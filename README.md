@@ -58,6 +58,27 @@ A Next.js application for filtering and analyzing Zoom chat messages.
    netlify deploy --prod
    ```
 
+## Troubleshooting Netlify Deployment
+
+If you encounter issues with your Netlify deployment:
+
+1. **Error: Configuring Next.js via 'next.config.ts' is not supported**
+   - Ensure you're using `next.config.js` instead of `next.config.ts`
+
+2. **Environment Variables Not Working**
+   - Make sure you've added the environment variables in Netlify's UI
+   - Check that the variable names match exactly (case-sensitive)
+   - Redeploy after adding environment variables
+
+3. **Build Failures**
+   - Check the build logs in Netlify for specific error messages
+   - Ensure all dependencies are correctly listed in package.json
+   - Verify that the Next.js version is compatible with Netlify
+
+4. **Routing Issues**
+   - The @netlify/plugin-nextjs plugin should handle routing automatically
+   - If you have custom redirects, add them to the netlify.toml file
+
 ## Environment Variables
 
 - `ZOOM_FILTER_API_KEY`: Secret key for dashboard authentication
