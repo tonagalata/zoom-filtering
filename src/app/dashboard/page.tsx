@@ -2,11 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Box, Container, Typography, Button, Paper, TextField, FormControl, InputLabel, Select, MenuItem } from "@mui/material";
-import { DataGrid } from "@mui/x-data-grid";
+import { Box, Container, Typography, Button, Paper, TextField, FormControl, InputLabel, Select, MenuItem, Grid } from "@mui/material";
+import { DataGrid, GridColDef } from "@mui/x-data-grid";
 import { parse } from "papaparse";
-import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
-import { LocalizationProvider, DatePicker } from "@mui/x-date-pickers";
+import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { SelectChangeEvent } from "@mui/material/Select";
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import SearchIcon from '@mui/icons-material/Search';
@@ -14,13 +13,60 @@ import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
 import PersonIcon from '@mui/icons-material/Person';
 import GroupIcon from '@mui/icons-material/Group';
 import EmojiEmotionsIcon from '@mui/icons-material/EmojiEmotions';
+import ClearIcon from '@mui/icons-material/Clear';
+import { format, isWithinInterval, parseISO } from "date-fns";
+
+// Sentiment analysis using Hugging Face API
+const analyzeSentimentBatch = async (messages: string[]): Promise<Record<string, string>> => {
+  try {
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/finiteautomata/bertweet-base-sentiment-analysis",
+      {
+        headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_HUGGINGFACE_API_KEY}` },
+        method: "POST",
+        body: JSON.stringify({ inputs: messages }),
+      }
+    );
+    const results = await response.json();
+    
+    const sentiments: Record<string, string> = {};
+    if (Array.isArray(results)) {
+      results.forEach((result, index) => {
+        if (result && result[0]) {
+          const sentiment = result[0];
+          switch (sentiment.label) {
+            case 'POS':
+              sentiments[messages[index]] = 'positive';
+              break;
+            case 'NEG':
+              sentiments[messages[index]] = 'negative';
+              break;
+            case 'NEU':
+              sentiments[messages[index]] = 'neutral';
+              break;
+            default:
+              sentiments[messages[index]] = 'neutral';
+          }
+        } else {
+          sentiments[messages[index]] = 'neutral';
+        }
+      });
+    }
+    return sentiments;
+  } catch (error) {
+    console.error('Error analyzing sentiment:', error);
+    // Return neutral for all messages in case of error
+    return messages.reduce((acc, msg) => ({ ...acc, [msg]: 'neutral' }), {});
+  }
+};
 
 export default function Dashboard() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [data, setData] = useState<any[]>([]);
   const [keyword, setKeyword] = useState("");
-  const [date, setDate] = useState<Date | null>(null);
+  const [startDate, setStartDate] = useState<Date | null>(null);
+  const [endDate, setEndDate] = useState<Date | null>(null);
   const [sender, setSender] = useState("");
   const [receiver, setReceiver] = useState("");
   const [sentiment, setSentiment] = useState("");
@@ -34,6 +80,7 @@ export default function Dashboard() {
     { value: "urgent", label: "Urgent 🚨" },
     { value: "friendly", label: "Friendly 🤝" }
   ]);
+  const [messageSentiments, setMessageSentiments] = useState<Record<string, string>>({});
 
   useEffect(() => {
     // Check if API key exists in localStorage
@@ -43,12 +90,12 @@ export default function Dashboard() {
     }
   }, [router]);
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = event.target.files?.[0];
     if (uploadedFile) {
       setFile(uploadedFile);
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         const csvData = event.target?.result as string;
         const results = parse(csvData, {
           header: false,
@@ -56,6 +103,17 @@ export default function Dashboard() {
           dynamicTyping: true,
         });
         setData(results.data);
+
+        // Get unique messages for sentiment analysis
+        const messages = Array.from(new Set(
+          results.data.slice(1)
+            .map((row: any) => String(row[4]))
+            .filter(Boolean)
+        ));
+
+        // Analyze sentiments in batches
+        const sentiments = await analyzeSentimentBatch(messages);
+        setMessageSentiments(sentiments);
       };
       reader.readAsText(uploadedFile);
     }
@@ -65,8 +123,12 @@ export default function Dashboard() {
     setKeyword(event.target.value);
   };
 
-  const handleDateChange = (newDate: Date | null) => {
-    setDate(newDate);
+  const handleStartDateChange = (newDate: Date | null) => {
+    setStartDate(newDate);
+  };
+
+  const handleEndDateChange = (newDate: Date | null) => {
+    setEndDate(newDate);
   };
 
   const handleSenderChange = (event: SelectChangeEvent) => {
@@ -81,81 +143,40 @@ export default function Dashboard() {
     setSentiment(event.target.value);
   };
 
+  const handleClearFilters = () => {
+    setKeyword("");
+    setStartDate(null);
+    setEndDate(null);
+    setSender("");
+    setReceiver("");
+    setSentiment("");
+  };
+
   const filteredData = data.slice(1).filter((row) => {
-    const matchesKeyword = row.some((cell: any) => String(cell).toLowerCase().includes(keyword.toLowerCase()));
-    const matchesDate = date ? row.some((cell: any) => String(cell).includes(date.toISOString().split('T')[0])) : true;
+    const matchesKeyword = keyword
+      ? row.some((cell: any) => String(cell).toLowerCase().includes(keyword.toLowerCase()))
+      : true;
+
+    const messageDate = parseISO(row[3]);
+    let matchesDateRange = true;
+    
+    if (startDate && endDate) {
+      // Ensure start date is before end date
+      const [start, end] = startDate > endDate ? [endDate, startDate] : [startDate, endDate];
+      matchesDateRange = isWithinInterval(messageDate, { start, end });
+    } else if (startDate) {
+      matchesDateRange = messageDate >= startDate;
+    } else if (endDate) {
+      matchesDateRange = messageDate <= endDate;
+    }
+
     const matchesSender = sender ? String(row[1]) === sender : true;
     const matchesReceiver = receiver ? String(row[2]) === receiver : true;
-    
-    // Analyze message content for sentiment
-    const messageContent = String(row[4]).toLowerCase();
-    let matchesSentiment = true;
-    
-    if (sentiment) {
-      switch (sentiment) {
-        case 'positive':
-          matchesSentiment = messageContent.includes('great') || 
-                           messageContent.includes('excellent') || 
-                           messageContent.includes('good') || 
-                           messageContent.includes('happy') || 
-                           messageContent.includes('thanks') || 
-                           messageContent.includes('thank you') ||
-                           messageContent.includes('awesome') ||
-                           messageContent.includes('perfect');
-          break;
-        case 'negative':
-          matchesSentiment = messageContent.includes('unacceptable') || 
-                           messageContent.includes('bad') || 
-                           messageContent.includes('wrong') || 
-                           messageContent.includes('fail') || 
-                           messageContent.includes('error') || 
-                           messageContent.includes('issue') ||
-                           messageContent.includes('problem') ||
-                           messageContent.includes('fix');
-          break;
-        case 'urgent':
-          matchesSentiment = messageContent.includes('urgent') || 
-                           messageContent.includes('asap') || 
-                           messageContent.includes('emergency') || 
-                           messageContent.includes('critical') || 
-                           messageContent.includes('immediately') || 
-                           messageContent.includes('right now');
-          break;
-        case 'professional':
-          matchesSentiment = messageContent.includes('please') || 
-                           messageContent.includes('documentation') || 
-                           messageContent.includes('review') || 
-                           messageContent.includes('update') || 
-                           messageContent.includes('handle') || 
-                           messageContent.includes('situation') ||
-                           messageContent.includes('discuss') ||
-                           messageContent.includes('solution');
-          break;
-        case 'unprofessional':
-          matchesSentiment = messageContent.includes('shut up') || 
-                           messageContent.includes('stupid') || 
-                           messageContent.includes('idiot') || 
-                           messageContent.includes('dumb') || 
-                           messageContent.includes('useless') || 
-                           messageContent.includes('waste');
-          break;
-        case 'friendly':
-          matchesSentiment = messageContent.includes('hey') || 
-                           messageContent.includes('hi') || 
-                           messageContent.includes('hello') || 
-                           messageContent.includes('guys') || 
-                           messageContent.includes('team') || 
-                           messageContent.includes('checking in') ||
-                           messageContent.includes('how are you') ||
-                           messageContent.includes('doing well');
-          break;
-        case 'neutral':
-          matchesSentiment = !messageContent.match(/great|excellent|good|happy|thanks|bad|wrong|fail|error|issue|urgent|asap|emergency|critical|please|documentation|review|update|handle|situation|discuss|solution|shut up|stupid|idiot|dumb|useless|waste|hey|hi|hello|guys|team|checking in|how are you|doing well/i);
-          break;
-      }
-    }
-    
-    return matchesKeyword && matchesDate && matchesSender && matchesReceiver && matchesSentiment;
+    const message = String(row[4]);
+    const messageSentiment = messageSentiments[message] || 'neutral';
+    const matchesSentiment = sentiment ? messageSentiment === sentiment : true;
+
+    return matchesKeyword && matchesDateRange && matchesSender && matchesReceiver && matchesSentiment;
   });
 
   const uniqueSenders = Array.from(new Set(data.slice(1).map(row => String(row[1])))).sort();
@@ -176,7 +197,7 @@ export default function Dashboard() {
     'Edited/Deleted Time (UTC)': row[9],
   }));
 
-  const columns = [
+  const columns: GridColDef[] = [
     { field: 'Session Id', headerName: 'Session ID', width: 130 },
     { field: 'Sender', headerName: 'Sender', width: 130 },
     { field: 'Receiver', headerName: 'Receiver', width: 130 },
@@ -195,7 +216,7 @@ export default function Dashboard() {
       background: 'linear-gradient(120deg, #f6f7f9 0%, #e9eef5 100%)',
       py: 8 
     }}>
-      <Container maxWidth="lg">
+      <Container maxWidth="xl">
         <Typography 
           variant="h2" 
           component="h1" 
@@ -223,94 +244,84 @@ export default function Dashboard() {
           Upload your Zoom chat history and use the filters below to find specific messages
         </Typography>
 
-        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }, gap: 4, mb: 6 }}>
-          <Paper 
-            elevation={3} 
-            sx={{ 
-              p: 3,
-              height: '100%',
-              transition: 'transform 0.2s',
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 3 }}>
+          <Button
+            variant="outlined"
+            startIcon={<ClearIcon />}
+            onClick={handleClearFilters}
+            sx={{
+              color: '#666',
+              borderColor: '#666',
               '&:hover': {
-                transform: 'translateY(-5px)'
+                backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                borderColor: '#666',
               }
             }}
           >
-            <CloudUploadIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Upload CSV File
-            </Typography>
-            <Button
-              variant="outlined"
-              component="label"
-              startIcon={<CloudUploadIcon />}
+            Clear All Filters
+          </Button>
+        </Box>
+
+        <Grid container spacing={3}>
+          <Grid item xs={12}>
+            <Paper 
+              elevation={3} 
               sx={{ 
-                width: '100%', 
-                height: '56px',
-                borderColor: '#2196F3',
-                color: '#2196F3',
+                p: 3,
+                height: '100%',
+                transition: 'transform 0.2s',
                 '&:hover': {
-                  borderColor: '#1976D2',
-                  backgroundColor: 'rgba(33, 150, 243, 0.04)'
+                  transform: 'translateY(-5px)'
                 }
               }}
             >
-              {file ? file.name : 'Choose File'}
-              <input type="file" hidden accept=".csv" onChange={handleFileUpload} />
-            </Button>
-          </Paper>
-
-          <Paper 
-            elevation={3} 
-            sx={{ 
-              p: 3,
-              height: '100%',
-              transition: 'transform 0.2s',
-              '&:hover': {
-                transform: 'translateY(-5px)'
-              }
-            }}
-          >
-            <SearchIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Search
-            </Typography>
-            <TextField
-              fullWidth
-              label="Keyword"
-              value={keyword}
-              onChange={handleKeywordChange}
-              sx={{ 
-                '& .MuiOutlinedInput-root': {
-                  '&:hover fieldset': {
-                    borderColor: '#2196F3',
-                  },
-                },
-              }}
-            />
-          </Paper>
-
-          <Paper 
-            elevation={3} 
-            sx={{ 
-              p: 3,
-              height: '100%',
-              transition: 'transform 0.2s',
-              '&:hover': {
-                transform: 'translateY(-5px)'
-              }
-            }}
-          >
-            <CalendarTodayIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Date Filter
-            </Typography>
-            <LocalizationProvider dateAdapter={AdapterDateFns}>
-              <DatePicker
-                label="Select Date"
-                value={date}
-                onChange={handleDateChange}
+              <CloudUploadIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
+              <Typography variant="h6" gutterBottom>
+                Upload CSV File
+              </Typography>
+              <Button
+                variant="outlined"
+                component="label"
+                startIcon={<CloudUploadIcon />}
                 sx={{ 
-                  width: '100%',
+                  width: '100%', 
+                  height: '56px',
+                  borderColor: '#2196F3',
+                  color: '#2196F3',
+                  '&:hover': {
+                    borderColor: '#1976D2',
+                    backgroundColor: 'rgba(33, 150, 243, 0.04)'
+                  }
+                }}
+              >
+                {file ? file.name : 'Choose File'}
+                <input type="file" hidden accept=".csv" onChange={handleFileUpload} />
+              </Button>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12} md={6}>
+            <Paper 
+              elevation={3} 
+              sx={{ 
+                p: 3,
+                height: '100%',
+                transition: 'transform 0.2s',
+                '&:hover': {
+                  transform: 'translateY(-5px)'
+                }
+              }}
+            >
+              <SearchIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
+              <Typography variant="h6" gutterBottom>
+                Search
+              </Typography>
+              <TextField
+                fullWidth
+                label="Keyword"
+                value={keyword}
+                onChange={handleKeywordChange}
+                sx={{ 
                   '& .MuiOutlinedInput-root': {
                     '&:hover fieldset': {
                       borderColor: '#2196F3',
@@ -318,138 +329,177 @@ export default function Dashboard() {
                   },
                 }}
               />
-            </LocalizationProvider>
-          </Paper>
+            </Paper>
+          </Grid>
 
-          <Paper 
-            elevation={3} 
-            sx={{ 
-              p: 3,
-              height: '100%',
-              transition: 'transform 0.2s',
-              '&:hover': {
-                transform: 'translateY(-5px)'
-              }
-            }}
-          >
-            <PersonIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Sender Filter
-            </Typography>
-            <FormControl fullWidth>
-              <InputLabel id="sender-label">Select Sender</InputLabel>
-              <Select 
-                labelId="sender-label"
-                value={sender} 
-                onChange={handleSenderChange}
-                label="Select Sender"
-                sx={{
-                  '&:hover .MuiOutlinedInput-notchedOutline': {
-                    borderColor: '#2196F3',
-                  },
-                }}
-              >
-                <MenuItem value="">All</MenuItem>
-                {uniqueSenders.map((sender) => (
-                  <MenuItem key={sender} value={sender}>{sender}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Paper>
+          <Grid item xs={12} md={6}>
+            <Paper 
+              elevation={3} 
+              sx={{ 
+                p: 3,
+                height: '100%',
+                transition: 'transform 0.2s',
+                '&:hover': {
+                  transform: 'translateY(-5px)'
+                }
+              }}
+            >
+              <CalendarTodayIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
+              <Typography variant="h6" gutterBottom>
+                Date Filter
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <DatePicker
+                  label="Start Date"
+                  value={startDate}
+                  onChange={handleStartDateChange}
+                  slotProps={{ textField: { fullWidth: true } }}
+                />
+                <DatePicker
+                  label="End Date"
+                  value={endDate}
+                  onChange={handleEndDateChange}
+                  slotProps={{ textField: { fullWidth: true } }}
+                />
+              </Box>
+            </Paper>
+          </Grid>
 
-          <Paper 
-            elevation={3} 
-            sx={{ 
-              p: 3,
-              height: '100%',
-              transition: 'transform 0.2s',
-              '&:hover': {
-                transform: 'translateY(-5px)'
-              }
-            }}
-          >
-            <GroupIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Receiver Filter
-            </Typography>
-            <FormControl fullWidth>
-              <InputLabel id="receiver-label">Select Receiver</InputLabel>
-              <Select 
-                labelId="receiver-label"
-                value={receiver} 
-                onChange={handleReceiverChange}
-                label="Select Receiver"
-                sx={{
-                  '&:hover .MuiOutlinedInput-notchedOutline': {
-                    borderColor: '#2196F3',
-                  },
-                }}
-              >
-                <MenuItem value="">All</MenuItem>
-                {uniqueReceivers.map((receiver) => (
-                  <MenuItem key={receiver} value={receiver}>{receiver}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Paper>
-
-          <Paper 
-            elevation={3} 
-            sx={{ 
-              p: 3,
-              height: '100%',
-              transition: 'transform 0.2s',
-              '&:hover': {
-                transform: 'translateY(-5px)'
-              }
-            }}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-              <EmojiEmotionsIcon sx={{ fontSize: 40, color: '#2196F3' }} />
-              <Typography variant="h6">
-                Message Tone
-                <Typography
-                  component="span"
+          <Grid item xs={12} md={6}>
+            <Paper 
+              elevation={3} 
+              sx={{ 
+                p: 3,
+                height: '100%',
+                transition: 'transform 0.2s',
+                '&:hover': {
+                  transform: 'translateY(-5px)'
+                }
+              }}
+            >
+              <PersonIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
+              <Typography variant="h6" gutterBottom>
+                Sender Filter
+              </Typography>
+              <FormControl fullWidth>
+                <InputLabel id="sender-label">Select Sender</InputLabel>
+                <Select 
+                  labelId="sender-label"
+                  value={sender} 
+                  onChange={handleSenderChange}
+                  label="Select Sender"
                   sx={{
-                    ml: 1,
-                    fontSize: '0.75rem',
-                    color: '#fff',
-                    backgroundColor: '#2196F3',
-                    px: 1,
-                    py: 0.5,
-                    borderRadius: 1,
-                    fontWeight: 'bold'
+                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                      borderColor: '#2196F3',
+                    },
                   }}
                 >
-                  BETA
-                </Typography>
+                  <MenuItem value="">All</MenuItem>
+                  {uniqueSenders.map((sender) => (
+                    <MenuItem key={sender} value={sender}>{sender}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12} md={6}>
+            <Paper 
+              elevation={3} 
+              sx={{ 
+                p: 3,
+                height: '100%',
+                transition: 'transform 0.2s',
+                '&:hover': {
+                  transform: 'translateY(-5px)'
+                }
+              }}
+            >
+              <GroupIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
+              <Typography variant="h6" gutterBottom>
+                Receiver Filter
               </Typography>
-            </Box>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Filter messages based on their emotional tone and professionalism level
-            </Typography>
-            <FormControl fullWidth>
-              <InputLabel id="sentiment-label">Select Message Tone</InputLabel>
-              <Select 
-                labelId="sentiment-label"
-                value={sentiment} 
-                onChange={handleSentimentChange}
-                label="Select Message Tone"
-                sx={{
-                  '&:hover .MuiOutlinedInput-notchedOutline': {
-                    borderColor: '#2196F3',
-                  },
-                }}
-              >
-                {sentimentOptions.map((option) => (
-                  <MenuItem key={option.value} value={option.value}>
-                    {option.label}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Paper>
-        </Box>
+              <FormControl fullWidth>
+                <InputLabel id="receiver-label">Select Receiver</InputLabel>
+                <Select 
+                  labelId="receiver-label"
+                  value={receiver} 
+                  onChange={handleReceiverChange}
+                  label="Select Receiver"
+                  sx={{
+                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                      borderColor: '#2196F3',
+                    },
+                  }}
+                >
+                  <MenuItem value="">All</MenuItem>
+                  {uniqueReceivers.map((receiver) => (
+                    <MenuItem key={receiver} value={receiver}>{receiver}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12}>
+            <Paper 
+              elevation={3} 
+              sx={{ 
+                p: 3,
+                height: '100%',
+                transition: 'transform 0.2s',
+                '&:hover': {
+                  transform: 'translateY(-5px)'
+                }
+              }}
+            >
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                <EmojiEmotionsIcon sx={{ fontSize: 40, color: '#2196F3' }} />
+                <Typography variant="h6">
+                  Message Tone
+                  <Typography
+                    component="span"
+                    sx={{
+                      ml: 1,
+                      fontSize: '0.75rem',
+                      color: '#fff',
+                      backgroundColor: '#2196F3',
+                      px: 1,
+                      py: 0.5,
+                      borderRadius: 1,
+                      fontWeight: 'bold'
+                    }}
+                  >
+                    BETA
+                  </Typography>
+                </Typography>
+              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Filter messages based on their emotional tone and professionalism level
+              </Typography>
+              <FormControl fullWidth>
+                <InputLabel id="sentiment-label">Select Message Tone</InputLabel>
+                <Select 
+                  labelId="sentiment-label"
+                  value={sentiment} 
+                  onChange={handleSentimentChange}
+                  label="Select Message Tone"
+                  sx={{
+                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                      borderColor: '#2196F3',
+                    },
+                  }}
+                >
+                  {sentimentOptions.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Paper>
+          </Grid>
+        </Grid>
 
         <Paper 
           elevation={3} 
