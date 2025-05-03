@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Box, Container, Typography, Button, Paper, TextField, FormControl, InputLabel, Select, MenuItem, Grid } from "@mui/material";
+import { Box, Container, Typography, Button, Paper, TextField, FormControl, InputLabel, Select, MenuItem, Grid, CircularProgress } from "@mui/material";
 import { DataGrid, GridColDef } from "@mui/x-data-grid";
 import { parse } from "papaparse";
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
@@ -14,6 +14,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import GroupIcon from '@mui/icons-material/Group';
 import EmojiEmotionsIcon from '@mui/icons-material/EmojiEmotions';
 import ClearIcon from '@mui/icons-material/Clear';
+import DownloadIcon from '@mui/icons-material/Download';
 import { format, isWithinInterval, parseISO } from "date-fns";
 
 // Sentiment analysis using Hugging Face API
@@ -81,6 +82,8 @@ export default function Dashboard() {
     { value: "friendly", label: "Friendly 🤝" }
   ]);
   const [messageSentiments, setMessageSentiments] = useState<Record<string, string>>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
 
   useEffect(() => {
     // Check if API key exists in localStorage
@@ -94,6 +97,9 @@ export default function Dashboard() {
     const uploadedFile = event.target.files?.[0];
     if (uploadedFile) {
       setFile(uploadedFile);
+      setIsAnalyzing(true);
+      setAnalysisProgress(0);
+
       const reader = new FileReader();
       reader.onload = async (event) => {
         const csvData = event.target?.result as string;
@@ -111,9 +117,13 @@ export default function Dashboard() {
             .filter(Boolean)
         ));
 
+        setAnalysisProgress(30); // File parsed
+
         // Analyze sentiments in batches
         const sentiments = await analyzeSentimentBatch(messages);
         setMessageSentiments(sentiments);
+        setAnalysisProgress(100);
+        setIsAnalyzing(false);
       };
       reader.readAsText(uploadedFile);
     }
@@ -210,6 +220,27 @@ export default function Dashboard() {
     { field: 'Edited/Deleted Time (UTC)', headerName: 'Edit Time', width: 180 },
   ];
 
+  const handleExport = () => {
+    // Get the headers from the original data
+    const headers = data[0] as string[];
+    
+    // Create CSV content
+    const csvContent = [
+      headers.join(','),
+      ...filteredData.map(row => row.join(','))
+    ].join('\n');
+
+    // Create blob and download link
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `filtered_messages_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <Box sx={{ 
       minHeight: '100vh',
@@ -275,28 +306,64 @@ export default function Dashboard() {
                 }
               }}
             >
-              <CloudUploadIcon sx={{ fontSize: 40, color: '#2196F3', mb: 2 }} />
-              <Typography variant="h6" gutterBottom>
-                Upload CSV File
-              </Typography>
-              <Button
-                variant="outlined"
-                component="label"
-                startIcon={<CloudUploadIcon />}
-                sx={{ 
-                  width: '100%', 
-                  height: '56px',
-                  borderColor: '#2196F3',
-                  color: '#2196F3',
-                  '&:hover': {
-                    borderColor: '#1976D2',
-                    backgroundColor: 'rgba(33, 150, 243, 0.04)'
-                  }
-                }}
-              >
-                {file ? file.name : 'Choose File'}
-                <input type="file" hidden accept=".csv" onChange={handleFileUpload} />
-              </Button>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
+                <CloudUploadIcon sx={{ fontSize: 40, color: '#2196F3' }} />
+                <Typography variant="h6">
+                  Upload CSV File
+                  {isAnalyzing && (
+                    <Typography
+                      component="span"
+                      sx={{
+                        ml: 1,
+                        fontSize: '0.75rem',
+                        color: '#fff',
+                        backgroundColor: '#2196F3',
+                        px: 1,
+                        py: 0.5,
+                        borderRadius: 1,
+                        fontWeight: 'bold'
+                      }}
+                    >
+                      Analyzing Messages...
+                    </Typography>
+                  )}
+                </Typography>
+              </Box>
+              <Box sx={{ position: 'relative', display: 'inline-flex', width: '100%' }}>
+                <Button
+                  variant="outlined"
+                  component="label"
+                  startIcon={<CloudUploadIcon />}
+                  disabled={isAnalyzing}
+                  sx={{ 
+                    width: '100%', 
+                    height: '56px',
+                    borderColor: '#2196F3',
+                    color: '#2196F3',
+                    '&:hover': {
+                      borderColor: '#1976D2',
+                      backgroundColor: 'rgba(33, 150, 243, 0.04)'
+                    }
+                  }}
+                >
+                  {file ? file.name : 'Choose File'}
+                  <input type="file" hidden accept=".csv" onChange={handleFileUpload} />
+                </Button>
+                {isAnalyzing && (
+                  <CircularProgress
+                    variant="determinate"
+                    value={analysisProgress}
+                    size={24}
+                    sx={{
+                      position: 'absolute',
+                      right: 16,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      color: '#2196F3',
+                    }}
+                  />
+                )}
+              </Box>
             </Paper>
           </Grid>
 
@@ -522,18 +589,35 @@ export default function Dashboard() {
             >
               Messages
             </Typography>
-            <Typography 
-              variant="body2" 
-              color="text.secondary"
-              sx={{ 
-                backgroundColor: '#f5f5f5',
-                px: 2,
-                py: 1,
-                borderRadius: 1
-              }}
-            >
-              Showing {filteredData.length} results
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <Typography 
+                variant="body2" 
+                color="text.secondary"
+                sx={{ 
+                  backgroundColor: '#f5f5f5',
+                  px: 2,
+                  py: 1,
+                  borderRadius: 1
+                }}
+              >
+                Showing {filteredData.length} results
+              </Typography>
+              <Button
+                variant="outlined"
+                startIcon={<DownloadIcon />}
+                onClick={handleExport}
+                sx={{
+                  color: '#2196F3',
+                  borderColor: '#2196F3',
+                  '&:hover': {
+                    backgroundColor: 'rgba(33, 150, 243, 0.04)',
+                    borderColor: '#1976D2',
+                  }
+                }}
+              >
+                Export CSV
+              </Button>
+            </Box>
           </Box>
           <Box sx={{ height: 600, width: '100%' }}>
             <DataGrid
